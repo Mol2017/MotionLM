@@ -1,15 +1,11 @@
 # MotionLM: Multi-Agent Motion Forecasting as Language Modeling
 
-This repository contains a reproduction of the MotionLM model from the paper:
+MotionLM represents continuous trajectories as sequences of discrete motion tokens and casts multi-agent motion prediction as a language modeling task. This repository contains a reproduction of the MotionLM model from the paper:
 
 **"MotionLM: Multi-Agent Motion Forecasting as Language Modeling"**  
 *Ari Seff, Brian Cera, Dian Chen, Mason Ng, Aurick Zhou, Nigamaa Nayakanti, Khaled S. Refaat, Rami Al-Rfou, Benjamin Sapp*  
 International Conference on Computer Vision (ICCV) 2023  
 [Paper Link](https://arxiv.org/abs/2309.16534)
-
-## Overview
-
-MotionLM represents continuous trajectories as sequences of discrete motion tokens and casts multi-agent motion prediction as a language modeling task.
 
 ## Reproduced Components
 
