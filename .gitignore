@@ -1,0 +1,19 @@
+.venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.egg-info/
+dist/
+build/
+.python-version
+
+# Local / generated
+.claude/
+runs/
+checkpoints/
+
+# Images: ignore everything, whitelist only the README demo set
+img/*
+!img/example/
+!img/long_loss.png
+!img/motion_tokenizer_reconstruction_error.png
