@@ -13,13 +13,25 @@ International Conference on Computer Vision (ICCV) 2023
 A 10.8M-parameter MotionLM trained for 3 full epochs (≈138k steps, batch=48) on the WOMD `VEHICLE` marginal split. End-of-epoch eval on 100k val samples at K=64 gave:
 **val CE=1.70 · minADE@8s=1.96 m · minFDE@8s=4.39 m · MR@8s=0.39**.
 
-**Working prediction** — 6 predicted modes (colored, by confidence) vs. dashed GT. Agent-frame, 11 past + 80 future frames @ 10 Hz:
+All animations below show 11 past + 80 future frames @ 10 Hz in agent frame (modeled agent at origin, +x = heading). The 6 predicted modes are color-coded by confidence; the dashed black line is the ground-truth future.
 
-![Good inference example](img/example/good_inference.png)
+### Working predictions
 
-**Failure case** — same model on a scenario with minFDE@8s ≈ 41 m (one of the top-6 misses out of 225 scanned val samples). Model commits to the wrong direction early; the error compounds over the 8 s horizon. Current MR@8s = 0.39 comes largely from cases like this — fast-agent scenarios, sharp turns, or wrong lane/direction commitment.
+Lowest-FDE samples from a 225-sample scan — the model tightly tracks GT across the 8 s horizon.
 
-![Miss inference example](img/example/miss_inference.png)
+| val.100 / sample 9 — highway, ~15 m/s, minFDE@8s ≈ 0.3 m | val.20 / sample 7 — urban, ~5 m/s, minFDE@8s ≈ 0.3 m |
+|:--:|:--:|
+| ![good1](img/example/good1.gif) | ![good2](img/example/good2.gif) |
+
+### Failure cases
+
+Representative high-error samples. These are what drives the aggregate MR@8s = 0.39 — fast agents, wrong lane/direction commitment, or early token errors that compound over 8 s.
+
+| val.0 / sample 2 — minFDE@8s ≈ 41 m | val.100 / sample 0 — mode cloud drifts off GT |
+|:--:|:--:|
+| ![bad1](img/example/bad1.gif) | ![bad2](img/example/bad2.gif) |
+
+### Training and tokenizer diagnostics
 
 **Training loss** (3-epoch, 138k steps, constant LR 2e-4). The plateau at ~1.69 was the primary signal to add warmup + cosine decay (see Roadmap):
 
@@ -28,8 +40,6 @@ A 10.8M-parameter MotionLM trained for 3 full epochs (≈138k steps, batch=48) o
 **Verlet tokenizer reconstruction** — the quantization floor for a 13×13 bin grid. Finer grids (17×17) could meaningfully lower the minADE floor:
 
 ![Tokenizer reconstruction error](img/motion_tokenizer_reconstruction_error.png)
-
-Animated versions of the inference scenarios above: [`img/example/good_inference.gif`](img/example/good_inference.gif) · [`img/example/miss_inference.gif`](img/example/miss_inference.gif).
 
 ## Reproduced Components
 
