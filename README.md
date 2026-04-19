@@ -83,6 +83,29 @@ uv run pytest tests/
 Covers tokenizer round-trip, sparse/dense shard schema, scene encoder, decoder,
 and full end-to-end forward + inference.
 
+### Convert WOMD tfrecords → shards
+
+Training reads `.pt.zst` shards produced from WOMD v1.3.1 scenario tfrecords.
+The sparse schema (see `data/shard_schema.py`) keeps each shard to ~115 MB
+compressed.
+
+Single file:
+
+```bash
+uv run python -m data.convert <input.tfrecord> <output.pt.zst>
+```
+
+Bulk download + convert (streams gs://, keeps at most `$PARALLEL` tfrecords on
+disk at a time, resume-safe, deletes tfrecords after conversion):
+
+```bash
+SHARD_ROOT=$HOME/shards bash scripts/prepare_shards.sh training validation
+```
+
+Produces `$SHARD_ROOT/training/train.<i>of1000.pt.zst` and
+`$SHARD_ROOT/validation/val.<i>of150.pt.zst`. Point `--train-shards` / `--val-shards`
+below at these paths.
+
 ### Train a model
 
 For a quick sanity run (one shard each side, ~3 min on an RTX 5080):
@@ -275,62 +298,52 @@ upgrade if you need strict parity.
 
 ## Roadmap / TODO
 
-Ideas ranked roughly by expected win per effort. Items marked with ⭐ are the
-cheap top-3.
+Measured at 11M params on a 16 GB RTX 5080: baseline 9.55 it/s ≈ 458 samples/s.
+**Throughput is at the hardware ceiling** — see summary below. Real headroom is
+in prediction quality.
 
-### Throughput (backward is 63% of step time → target backward)
+### Throughput (measured)
 
-> Backward ≈ fwd recompute + grad ops, so most fwd-side wins propagate to bwd.
-> Items below tagged **[fwd+bwd]** affect both passes; **[bwd]** hits backward only;
-> **[opt]** hits the optimizer phase only.
+| Attempted | Result |
+|---|---|
+| Fused AdamW | **+3%** — kept |
+| `torch.compile` (reduce-overhead / max-autotune) | ±1% — reverted, Inductor has no headroom at this scale |
+| Pure-causal SA for N=1 (FlashAttention) | ±0.2% — reverted, T=16 is too short for attention to matter |
 
-**Low-risk, quick wins**
-- [x] ✅ **Fused AdamW** (`torch.optim.AdamW(..., fused=True)`) **[opt]** — *landed; baked into current baseline of 9.55 it/s.*
-- [x] ❌ **`torch.compile(mode="reduce-overhead")`** **[fwd+bwd]** — *measured −0.3% (within noise). Inductor has no headroom at 11M params where SDPA already fuses the hot kernels. Re-try if model scales past ~50M params.*
-- [x] ❌ **`torch.compile(mode="max-autotune")`** **[fwd+bwd]** — *measured +0.8% (within noise), pays 60–120 s warmup.*
-- [ ] **Pre-cast loader tensors to bf16 on CPU** **[fwd+bwd]** — removes the `fp32→bf16` cast from fwd AND from bwd recompute (~0.5 ms + ~1.0 ms).
-- [ ] **Verify `non_blocking=True` h2d copies** end-to-end (no hidden `.cpu()` or sync in the forward).
-- [ ] **Audit `.contiguous()` / `.reshape()` copies** in `model/motion_decoder.py` and `model/scene_encoder.py` **[fwd+bwd]** — needless copies cost wall time in both passes.
-- [ ] **Pin positional encodings / static masks as `register_buffer`** **[fwd+bwd]** — avoids rebuilding per step.
+Remaining throughput knobs all have tradeoffs:
 
-**Medium effort**
-- [x] ❌ **Pure-causal SA fast path for N=1** — *prototyped and reverted. Measured **−0.2%** (within noise); T=16 keeps the attention matrix 16×16 per head, so attention isn't the hot kernel at this scale — FFN matmuls dominate. Not worth the branching.*
-- [ ] **Fused RMSNorm/LayerNorm + next linear (Triton)** **[fwd+bwd]** — 3–5% on both passes; low effort if borrowing a kernel from xformers.
-- [ ] **Selective grad-ckpt on roadgraph embedder only** **[bwd]** — recovers the 4.3 GB hotspot without the 30% full-model tax; may let batch 64 fit without global ckpt.
+- **Batch 64 + selective grad-ckpt** — ~10%, needs `PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True`
+- **Architecture shrink** (d_model 256→192, FFN 4×→3×, depth 4→3) — linear wins, quality cost
+- **Fused norms (Triton)** — 3–5%, requires an xformers-style kernel
 
-> **Summary of measured throughput experiments**: only **fused AdamW** (kept as a simple `fused=True` kwarg, no branching) remained after measurement. `torch.compile` and the pure-causal SA path were reverted because neither moved the needle beyond noise. The model is at the hardware ceiling on a 16 GB GPU at 11M params — **~9.55 it/s ≈ 458 samples/s**. Real speedups now require either (a) shrinking architecture (quality tradeoff), (b) batch=64 with selective ckpt (~10% at one-time setup cost), or (c) scaling the model to a regime where attention/compile wins reappear. **Quality improvements in §Prediction quality are the higher-leverage remaining work.**
+### Prediction quality (the real work)
 
-**Architecture (quality tradeoff; all items are [fwd+bwd])**
-- [ ] Shrink `d_model` 256 → 192 (~20–25% step time, risks accuracy).
-- [ ] Perceiver latents 192 → 128 (~8% step time; attention is O(n²) so 192²→128² is a −56% FLOPs cut for enc self-attn).
-- [ ] Decoder depth 4 → 3 (~12% step time, risks capacity).
-- [ ] Encoder self-attn layers 6 → 4 (~33% encoder compute).
-- [ ] FFN expansion 4× → 3× (`d_ff` 1024 → 768) — ~25% FFN compute cut.
+**Training recipe — highest leverage, no arch change**
 
-### Prediction quality (minADE / minFDE / MR)
-
-**Training recipe — biggest bang for buck, no arch changes**
-- [ ] ⭐ **LR schedule**: linear warmup 5–10% → cosine to 0. Currently constant `2e-4`; standard LM recipe typically buys 0.3–0.8 nat CE.
-- [ ] **Longer training** — 6–10 epochs vs 3; paper trains much longer.
-- [ ] **Gradient accumulation to effective batch 192–256** — smoother gradients.
-- [ ] **Label smoothing 0.1** on CE.
-- [ ] **EMA weights** for eval (`torch.optim.swa_utils.AveragedModel`).
+- [ ] ⭐ LR warmup + cosine decay — landed via `--lr-schedule cosine`; the 20h run validates the 0.3–0.8 nat CE headroom
+- [ ] Longer training — paper uses 600k steps × batch 256 (~20× more samples seen than current 138k × 48)
+- [ ] Weight decay 0.01 → 0.1 (paper uses 0.6); `beta2` 0.999 → 0.95 for plateau exit
+- [ ] ⭐ Neighbor-aware soft Verlet targets — Gaussian-blur one-hot over the 13×13 grid; addresses the tok_acc/CE divergence
+- [ ] Scheduled sampling — closes the train (teacher-forced) vs eval (free-running) gap driving minADE@8s ≈ 2m
+- [ ] Horizon-weighted CE — upweight later tokens since 8s error ≫ 3s error
+- [ ] Label smoothing 0.1; EMA / SWA weights for eval
 
 **Inference-only (no retrain)**
-- [ ] **K 64 → 512 at eval** — paper uses 512; linear eval cost. Biggest zero-effort win on minADE/minFDE.
-- [ ] **Temperature sweep** (τ = 0.7, 0.8, 1.0).
-- [ ] **Top-k / top-p truncation** (`--top-k 20`) — controls tail-mode hallucinations.
-- [ ] **Better NMS aggregation** — weighted-mean within clusters rather than greedy.
+
+- [ ] K 64 → 512 at eval — paper's value, ~14 h for full val (see §Evaluation); paper's Table 6 shows only ~2% minADE gain
+- [ ] Temperature sweep (τ = 0.7, 0.8, 1.0); top-k / top-p truncation
 
 **Tokenizer / data**
-- [ ] **Finer Verlet grid** 13×13 → 17×17 (289 bins) — lowers the minADE quantization floor (see `img/motion_tokenizer_reconstruction_error.png`). Full retrain + new vocab.
-- [ ] **Longer past context** `T_past` 11 → 21 — helpful for turns / accel. Stage-0 change + retrain.
 
-**Missing paper features (larger work)**
-- [ ] **Masked-LM pretraining** (paper's Stage A) — warms weights before scenario-conditioned training.
-- [ ] **Joint N=2 training on the interactive split** — unlocks Overlap Rate; currently marginal only.
-- [ ] **Intent bucketing classifier** — required for Soft-mAP.
-- [ ] **Heading-frame miss-rate projection** — current caveat above; parity with WOMD reference impl.
+- [ ] Finer Verlet grid 13×13 → 17×17 — lowers the quantization floor (see `img/motion_tokenizer_reconstruction_error.png`)
+- [ ] Longer past context `T_past` 11 → 21 — for turns and accel
+
+**Missing paper features (large)**
+
+- [ ] Masked-LM pretraining (paper's Stage A)
+- [ ] Joint N=2 training on the interactive split — unlocks Overlap Rate
+- [ ] Intent bucketing classifier — required for Soft-mAP
+- [ ] Heading-frame miss-rate projection — parity with WOMD reference impl
 
 ## Acknowledgments
 
