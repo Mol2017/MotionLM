@@ -89,6 +89,10 @@ Training reads `.pt.zst` shards produced from WOMD v1.3.1 scenario tfrecords.
 The sparse schema (see `data/shard_schema.py`) keeps each shard to ~115 MB
 compressed.
 
+> **Pre-converted shards** are available on Hugging Face:
+> [`wentao023/motionlm`](https://huggingface.co/datasets/wentao023/motionlm).
+> Download these directly to skip the tfrecord conversion step below.
+
 Single file:
 
 ```bash
